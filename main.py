@@ -31,7 +31,7 @@ from PIL import (
 
 app = FastAPI(
     title="RECODE Image and Video Converter",
-    version="2.0.0"
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -120,7 +120,7 @@ def download_image(url: str) -> Image.Image:
         with requests.get(
             url,
             headers={
-                "User-Agent": "RECODE-Image-Converter/2.0"
+                "User-Agent": "RECODE-Image-Converter/3.0"
             },
             timeout=(8, 15),
             stream=True,
@@ -224,7 +224,6 @@ def image_to_rle(
     width: int = 64,
     colors: int = 32
 ):
-    # Normalize orientation and transparency.
     image = ImageOps.exif_transpose(image).convert("RGBA")
 
     background = Image.new(
@@ -238,7 +237,6 @@ def image_to_rle(
         image
     ).convert("RGB")
 
-    # Resize while preserving aspect ratio.
     scale = min(
         width / image.width,
         MAX_OUTPUT_SIDE / image.height
@@ -252,7 +250,6 @@ def image_to_rle(
         Image.Resampling.LANCZOS
     )
 
-    # Palette quantization.
     quantized = image.quantize(
         colors=colors,
         method=Image.Quantize.MEDIANCUT
@@ -278,10 +275,6 @@ def image_to_rle(
         remap[i]
         for i in quantized.getdata()
     ]
-
-    # RLE encoding:
-    # 1 byte = run length
-    # 1 byte = palette index
 
     encoded = bytearray()
     pos = 0
@@ -321,14 +314,15 @@ def image_to_rle(
 def home():
     return {
         "service": "RECODE Image and Video Converter",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "endpoints": [
             "/health",
             "/convert",
             "/video/start",
             "/video/status/{job_id}",
             "/video/frame/{job_id}/{frame_index}",
-            "/video/convert/{job_id}/{frame_index}"
+            "/video/convert/{job_id}/{frame_index}",
+            "/video/batch/{job_id}"
         ]
     }
 
@@ -519,6 +513,8 @@ def process_video(job_id, url):
         folder / "frame_%06d.jpg"
     )
 
+    process = None
+
     try:
         video_update(
             job_id,
@@ -679,6 +675,7 @@ def process_video(job_id, url):
                     pass
 
         return_code = process.wait()
+        process = None
 
         if return_code != 0:
             raise ValueError(
@@ -706,6 +703,13 @@ def process_video(job_id, url):
         )
 
     except Exception as error:
+        if process is not None:
+            try:
+                process.kill()
+                process.wait()
+            except Exception:
+                pass
+
         video_update(
             job_id,
             status="error",
@@ -841,7 +845,7 @@ def video_frame(
 
 
 # ==========================================
-# NEW: CONVERT VIDEO FRAME DIRECTLY TO RLE
+# CONVERT ONE VIDEO FRAME TO RLE
 # ==========================================
 
 @app.get("/video/convert/{job_id}/{frame_index}")
@@ -859,7 +863,12 @@ def video_convert(
         le=256
     )
 ):
-    # Verify job and frame.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id):
+        raise HTTPException(
+            400,
+            "Invalid job ID."
+        )
+
     with VIDEO_LOCK:
         job = VIDEO_JOBS.get(job_id)
 
@@ -884,7 +893,6 @@ def video_convert(
                 "Frame does not exist."
             )
 
-    # Locate the locally stored JPEG.
     frame_number = frame_index + 1
 
     path = (
@@ -899,8 +907,6 @@ def video_convert(
             "Frame file not found."
         )
 
-    # Convert directly from disk.
-    # No external HTTP request is made.
     try:
         with Image.open(path) as source_image:
             source_image.load()
@@ -915,9 +921,6 @@ def video_convert(
 
         return result
 
-    except HTTPException:
-        raise
-
     except (
         UnidentifiedImageError,
         OSError,
@@ -927,6 +930,121 @@ def video_convert(
             500,
             "Could not convert video frame."
         )
+
+
+# ==========================================
+# BATCH CONVERT VIDEO FRAMES TO RLE
+# ==========================================
+
+@app.get("/video/batch/{job_id}")
+def video_batch(
+    job_id: str,
+    start: int = Query(
+        0,
+        ge=0
+    ),
+    count: int = Query(
+        30,
+        ge=1,
+        le=30
+    ),
+    width: int = Query(
+        64,
+        ge=8,
+        le=64
+    ),
+    colors: int = Query(
+        32,
+        ge=2,
+        le=32
+    )
+):
+    # Validate job ID.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id):
+        raise HTTPException(
+            400,
+            "Invalid job ID."
+        )
+
+    # Verify video job.
+    with VIDEO_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+
+        if not job:
+            raise HTTPException(
+                404,
+                "Video job not found."
+            )
+
+        if job["status"] != "ready":
+            raise HTTPException(
+                409,
+                "Video is not ready."
+            )
+
+        total_frames = job["frame_count"]
+
+    if start >= total_frames:
+        raise HTTPException(
+            404,
+            "Start frame does not exist."
+        )
+
+    end = min(
+        start + count,
+        total_frames
+    )
+
+    converted_frames = []
+
+    # Convert the requested frames.
+    for frame_index in range(start, end):
+        frame_number = frame_index + 1
+
+        path = (
+            VIDEO_ROOT
+            / job_id
+            / f"frame_{frame_number:06d}.jpg"
+        )
+
+        if not path.is_file():
+            raise HTTPException(
+                404,
+                f"Frame {frame_index} is missing."
+            )
+
+        try:
+            with Image.open(path) as source_image:
+                source_image.load()
+
+                result = image_to_rle(
+                    source_image,
+                    width,
+                    colors
+                )
+
+            result["frame_index"] = frame_index
+
+            converted_frames.append(result)
+
+        except (
+            UnidentifiedImageError,
+            OSError,
+            ValueError
+        ):
+            raise HTTPException(
+                500,
+                f"Could not convert frame {frame_index}."
+            )
+
+    return {
+        "job_id": job_id,
+        "start_frame": start,
+        "frame_count": len(converted_frames),
+        "total_frames": total_frames,
+        "fps": VIDEO_FPS,
+        "frames": converted_frames
+    }
 
 
 # ==========================================
