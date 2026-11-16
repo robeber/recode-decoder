@@ -1,5 +1,5 @@
+
 import ipaddress
-import os
 import re
 import secrets
 import socket
@@ -9,23 +9,31 @@ import threading
 
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
-from fastapi.responses import FileResponse
-import imageio_ffmpeg
-
 from io import BytesIO
 from urllib.parse import urlparse
-import ipaddress
-import socket
 
+import imageio_ffmpeg
 import requests
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image, ImageOps, UnidentifiedImageError
+from fastapi.responses import FileResponse
+from PIL import (
+    Image,
+    ImageOps,
+    UnidentifiedImageError,
+)
 
-app = FastAPI(title="RECODE Image Converter", version="1.0.0")
 
-# RECODE can call this API directly. The converter only fetches Postimages URLs.
+# ==========================================
+# APPLICATION
+# ==========================================
+
+app = FastAPI(
+    title="RECODE Image and Video Converter",
+    version="2.0.0"
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,7 +41,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ALLOWED_HOSTS = {"i.postimg.cc, rule34. xxx, api.rule34.xxx, wimg.rule34.xxx"}
+
+# ==========================================
+# IMAGE CONVERTER SETTINGS
+# ==========================================
+
+ALLOWED_HOSTS = {
+    "i.postimg.cc",
+}
+
 MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024
 MAX_SOURCE_PIXELS = 16_000_000
 MAX_OUTPUT_SIDE = 96
@@ -41,124 +57,251 @@ MAX_OUTPUT_SIDE = 96
 Image.MAX_IMAGE_PIXELS = MAX_SOURCE_PIXELS
 
 
-def validate_source_url(url: str) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
-        raise HTTPException(
-            status_code=400,
-            detail="Only HTTPS image URLs from i.postimg.cc are accepted.",
-        )
-    if parsed.username or parsed.password or parsed.port not in (None, 443):
-        raise HTTPException(status_code=400, detail="Invalid image URL.")
+# ==========================================
+# IMAGE URL VALIDATION
+# ==========================================
 
-    # Reject unusual DNS results as an extra SSRF safeguard.
+def validate_source_url(url: str):
+    parsed = urlparse(url)
+
+    if parsed.scheme != "https":
+        raise HTTPException(
+            400,
+            "HTTPS image URLs only."
+        )
+
+    if parsed.hostname not in ALLOWED_HOSTS:
+        raise HTTPException(
+            400,
+            "Image host is not allowed."
+        )
+
+    if (
+        parsed.username
+        or parsed.password
+        or parsed.port not in (None, 443)
+    ):
+        raise HTTPException(
+            400,
+            "Invalid image URL."
+        )
+
     try:
-        addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        addresses = socket.getaddrinfo(
+            parsed.hostname,
+            443,
+            type=socket.SOCK_STREAM
+        )
+
         for item in addresses:
             ip = ipaddress.ip_address(item[4][0])
-            if not ip.is_global:
-                raise HTTPException(status_code=400, detail="Image host did not resolve publicly.")
-    except socket.gaierror:
-        raise HTTPException(status_code=502, detail="Could not resolve the image host.")
 
+            if not ip.is_global:
+                raise HTTPException(
+                    400,
+                    "Image host is not publicly accessible."
+                )
+
+    except socket.gaierror:
+        raise HTTPException(
+            502,
+            "Could not resolve image host."
+        )
+
+
+# ==========================================
+# DOWNLOAD IMAGE
+# ==========================================
 
 def download_image(url: str) -> Image.Image:
     validate_source_url(url)
+
     try:
         with requests.get(
             url,
-            headers={"User-Agent": "RECODE-Image-Converter/1.0"},
+            headers={
+                "User-Agent": "RECODE-Image-Converter/2.0"
+            },
             timeout=(8, 15),
             stream=True,
-            allow_redirects=False,
+            allow_redirects=False
         ) as response:
+
             if response.is_redirect:
-                raise HTTPException(status_code=400, detail="Image redirects are not accepted.")
+                raise HTTPException(
+                    400,
+                    "Image redirects are not accepted."
+                )
+
             response.raise_for_status()
 
-            content_type = response.headers.get("content-type", "").split(";")[0].lower()
-            if content_type not in {"image/jpeg", "image/png"}:
-                raise HTTPException(status_code=415, detail="Source must be a JPG or PNG.")
+            content_type = (
+                response.headers
+                .get("content-type", "")
+                .split(";")[0]
+                .lower()
+            )
+
+            if content_type not in {
+                "image/jpeg",
+                "image/png"
+            }:
+                raise HTTPException(
+                    415,
+                    "Source must be JPG or PNG."
+                )
 
             length = response.headers.get("content-length")
+
             if length and int(length) > MAX_DOWNLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="Image is too large (5 MB maximum).")
+                raise HTTPException(
+                    413,
+                    "Image exceeds 5 MB."
+                )
 
             chunks = bytearray()
-            for chunk in response.iter_content(chunk_size=65536):
+
+            for chunk in response.iter_content(65536):
                 if chunk:
                     chunks.extend(chunk)
+
                     if len(chunks) > MAX_DOWNLOAD_BYTES:
-                        raise HTTPException(status_code=413, detail="Image is too large (5 MB maximum).")
+                        raise HTTPException(
+                            413,
+                            "Image exceeds 5 MB."
+                        )
 
         image = Image.open(BytesIO(chunks))
+
         if image.format not in {"JPEG", "PNG"}:
-            raise HTTPException(status_code=415, detail="Source must be a JPG or PNG.")
+            raise HTTPException(
+                415,
+                "Invalid image format."
+            )
+
         image.load()
+
         if image.width * image.height > MAX_SOURCE_PIXELS:
-            raise HTTPException(status_code=413, detail="Source image dimensions are too large.")
+            raise HTTPException(
+                413,
+                "Image dimensions are too large."
+            )
+
         return image
+
     except HTTPException:
         raise
+
     except requests.Timeout:
-        raise HTTPException(status_code=504, detail="Image host took too long to respond.")
+        raise HTTPException(
+            504,
+            "Image host timed out."
+        )
+
     except requests.RequestException:
-        raise HTTPException(status_code=502, detail="Could not download the image.")
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
-        raise HTTPException(status_code=400, detail="The URL did not contain a valid JPG or PNG.")
+        raise HTTPException(
+            502,
+            "Could not download image."
+        )
+
+    except (
+        UnidentifiedImageError,
+        OSError,
+        Image.DecompressionBombError
+    ):
+        raise HTTPException(
+            400,
+            "Invalid JPG or PNG image."
+        )
 
 
-@app.get("/")
-def home():
-    return {
-        "service": "RECODE Image Converter",
-        "usage": "/convert?url=POSTIMAGES_IMAGE_URL&width=48&colors=32",
-        "formats": ["JPEG", "PNG"],
-    }
+# ==========================================
+# SHARED IMAGE TO RLE CONVERTER
+# ==========================================
 
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-
-@app.get("/convert")
-def convert(
-    url: str = Query(..., min_length=12, max_length=2048),
-    width: int = Query(48, ge=8, le=MAX_OUTPUT_SIDE),
-    colors: int = Query(32, ge=2, le=256),
+def image_to_rle(
+    image: Image.Image,
+    width: int = 64,
+    colors: int = 32
 ):
-    image = download_image(url)
-
-    # Composite transparency onto white, then resize without changing aspect ratio.
+    # Normalize orientation and transparency.
     image = ImageOps.exif_transpose(image).convert("RGBA")
-    background = Image.new("RGBA", image.size, (255, 255, 255, 255))
-    image = Image.alpha_composite(background, image).convert("RGB")
 
-    scale = min(width / image.width, MAX_OUTPUT_SIDE / image.height)
+    background = Image.new(
+        "RGBA",
+        image.size,
+        (255, 255, 255, 255)
+    )
+
+    image = Image.alpha_composite(
+        background,
+        image
+    ).convert("RGB")
+
+    # Resize while preserving aspect ratio.
+    scale = min(
+        width / image.width,
+        MAX_OUTPUT_SIDE / image.height
+    )
+
     out_w = max(1, round(image.width * scale))
     out_h = max(1, round(image.height * scale))
-    image = image.resize((out_w, out_h), Image.Resampling.LANCZOS)
 
-    quantized = image.quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
+    image = image.resize(
+        (out_w, out_h),
+        Image.Resampling.LANCZOS
+    )
+
+    # Palette quantization.
+    quantized = image.quantize(
+        colors=colors,
+        method=Image.Quantize.MEDIANCUT
+    )
+
     palette_raw = quantized.getpalette()
-    used_indices = sorted(set(quantized.getdata()))
+
+    used_indices = sorted(
+        set(quantized.getdata())
+    )
+
     palette = [
         palette_raw[i * 3:i * 3 + 3]
         for i in used_indices
     ]
-    remap = {old: new for new, old in enumerate(used_indices)}
-    pixels = [remap[i] for i in quantized.getdata()]
 
-    # Binary RLE pairs: one byte run length (1..255), one byte palette index.
+    remap = {
+        old: new
+        for new, old in enumerate(used_indices)
+    }
+
+    pixels = [
+        remap[i]
+        for i in quantized.getdata()
+    ]
+
+    # RLE encoding:
+    # 1 byte = run length
+    # 1 byte = palette index
+
     encoded = bytearray()
     pos = 0
+
     while pos < len(pixels):
         index = pixels[pos]
         end = pos + 1
-        while end < len(pixels) and pixels[end] == index and end - pos < 255:
+
+        while (
+            end < len(pixels)
+            and pixels[end] == index
+            and end - pos < 255
+        ):
             end += 1
-        encoded.extend((end - pos, index))
+
+        encoded.extend((
+            end - pos,
+            index
+        ))
+
         pos = end
 
     return {
@@ -166,28 +309,102 @@ def convert(
         "height": out_h,
         "palette": palette,
         "rle": encoded.hex().upper(),
-        "format": "RLE8",
+        "format": "RLE8"
     }
 
+
 # ==========================================
-# RECODE VIDEO VIEWER
+# BASIC ROUTES
+# ==========================================
+
+@app.get("/")
+def home():
+    return {
+        "service": "RECODE Image and Video Converter",
+        "version": "2.0.0",
+        "endpoints": [
+            "/health",
+            "/convert",
+            "/video/start",
+            "/video/status/{job_id}",
+            "/video/frame/{job_id}/{frame_index}",
+            "/video/convert/{job_id}/{frame_index}"
+        ]
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True
+    }
+
+
+# ==========================================
+# NORMAL IMAGE CONVERTER
+# ==========================================
+
+@app.get("/convert")
+def convert(
+    url: str = Query(
+        ...,
+        min_length=12,
+        max_length=2048
+    ),
+    width: int = Query(
+        64,
+        ge=8,
+        le=MAX_OUTPUT_SIDE
+    ),
+    colors: int = Query(
+        32,
+        ge=2,
+        le=256
+    )
+):
+    image = download_image(url)
+
+    return image_to_rle(
+        image,
+        width,
+        colors
+    )
+
+
+# ==========================================
+# VIDEO SETTINGS
 # ==========================================
 
 VIDEO_MAX_BYTES = 100 * 1024 * 1024
 VIDEO_MAX_DURATION = 300
+
 VIDEO_FPS = 15
 VIDEO_WIDTH = 320
 VIDEO_HEIGHT = 180
 
-VIDEO_ROOT = Path(tempfile.gettempdir()) / "recode_videos"
-VIDEO_ROOT.mkdir(parents=True, exist_ok=True)
+VIDEO_ROOT = (
+    Path(tempfile.gettempdir())
+    / "recode_videos"
+)
+
+VIDEO_ROOT.mkdir(
+    parents=True,
+    exist_ok=True
+)
 
 VIDEO_JOBS = {}
 VIDEO_LOCK = threading.Lock()
-VIDEO_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+
+VIDEO_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2
+)
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
+
+# ==========================================
+# VIDEO JOB HELPERS
+# ==========================================
 
 def video_update(job_id, **values):
     with VIDEO_LOCK:
@@ -199,37 +416,68 @@ def validate_video_url(url):
     parsed = urlparse(url)
 
     if parsed.scheme != "https":
-        raise HTTPException(400, "HTTPS video URLs only.")
+        raise HTTPException(
+            400,
+            "HTTPS video URLs only."
+        )
 
-    if not parsed.hostname or parsed.username or parsed.password:
-        raise HTTPException(400, "Invalid video URL.")
+    if (
+        not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
+        raise HTTPException(
+            400,
+            "Invalid video URL."
+        )
 
     if parsed.port not in (None, 443):
-        raise HTTPException(400, "Invalid video port.")
+        raise HTTPException(
+            400,
+            "Invalid video port."
+        )
 
     host = parsed.hostname
 
     try:
         try:
-            addresses = [ipaddress.ip_address(host)]
+            addresses = [
+                ipaddress.ip_address(host)
+            ]
+
         except ValueError:
             addresses = [
                 ipaddress.ip_address(item[4][0])
                 for item in socket.getaddrinfo(
-                    host, 443, type=socket.SOCK_STREAM
+                    host,
+                    443,
+                    type=socket.SOCK_STREAM
                 )
             ]
 
-        if not addresses or any(not ip.is_global for ip in addresses):
-            raise HTTPException(400, "Video host must be publicly accessible.")
+        if not addresses or any(
+            not ip.is_global for ip in addresses
+        ):
+            raise HTTPException(
+                400,
+                "Video host must be publicly accessible."
+            )
 
     except socket.gaierror:
-        raise HTTPException(502, "Could not resolve video host.")
+        raise HTTPException(
+            502,
+            "Could not resolve video host."
+        )
 
 
 def get_video_duration(path):
     result = subprocess.run(
-        [FFMPEG, "-hide_banner", "-i", str(path)],
+        [
+            FFMPEG,
+            "-hide_banner",
+            "-i",
+            str(path)
+        ],
         capture_output=True,
         text=True,
         timeout=30
@@ -241,19 +489,35 @@ def get_video_duration(path):
     )
 
     if not match:
-        raise ValueError("Could not read video duration.")
+        raise ValueError(
+            "Could not read video duration."
+        )
 
     hours, minutes, seconds = match.groups()
 
-    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    return (
+        int(hours) * 3600
+        + int(minutes) * 60
+        + float(seconds)
+    )
 
+
+# ==========================================
+# VIDEO PROCESSING
+# ==========================================
 
 def process_video(job_id, url):
     folder = VIDEO_ROOT / job_id
-    folder.mkdir(parents=True, exist_ok=True)
+    folder.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
     source = folder / "source_video"
-    pattern = folder / "frame_%06d.jpg"
+
+    pattern = (
+        folder / "frame_%06d.jpg"
+    )
 
     try:
         video_update(
@@ -263,39 +527,53 @@ def process_video(job_id, url):
             message="Downloading video"
         )
 
-         validate_video_url(url)
+        validate_video_url(url)
 
         with requests.get(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-                "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8"
             },
             stream=True,
             timeout=(10, 30),
-            allow_redirects=False,
+            allow_redirects=False
         ) as response:
 
             if response.is_redirect:
-                raise ValueError("Video redirects are not supported.")
+                raise ValueError(
+                    "Video redirects are not supported."
+                )
 
             response.raise_for_status()
 
-            content_type = response.headers.get(
-                "content-type", ""
-            ).split(";")[0].lower()
+            content_type = (
+                response.headers
+                .get("content-type", "")
+                .split(";")[0]
+                .lower()
+            )
 
             if content_type not in {
                 "video/mp4",
                 "video/webm",
                 "video/quicktime"
             }:
-                raise ValueError("URL must point directly to an MP4, WebM or MOV video.")
+                raise ValueError(
+                    "URL must point directly to MP4, WebM or MOV."
+                )
 
-            length = response.headers.get("content-length")
+            length = response.headers.get(
+                "content-length"
+            )
 
-            if length and int(length) > VIDEO_MAX_BYTES:
-                raise ValueError("Video exceeds the 100 MB limit.")
+            if (
+                length
+                and int(length) > VIDEO_MAX_BYTES
+            ):
+                raise ValueError(
+                    "Video exceeds 100 MB."
+                )
 
             downloaded = 0
 
@@ -307,19 +585,33 @@ def process_video(job_id, url):
                     downloaded += len(chunk)
 
                     if downloaded > VIDEO_MAX_BYTES:
-                        raise ValueError("Video exceeds the 100 MB limit.")
+                        raise ValueError(
+                            "Video exceeds 100 MB."
+                        )
 
                     file.write(chunk)
 
                     video_update(
                         job_id,
-                        progress=min(20, int(downloaded / VIDEO_MAX_BYTES * 20))
+                        progress=min(
+                            20,
+                            int(
+                                downloaded
+                                / VIDEO_MAX_BYTES
+                                * 20
+                            )
+                        )
                     )
 
         duration = get_video_duration(source)
 
-        if duration <= 0 or duration > VIDEO_MAX_DURATION:
-            raise ValueError("Video must be between 1 second and 5 minutes.")
+        if (
+            duration <= 0
+            or duration > VIDEO_MAX_DURATION
+        ):
+            raise ValueError(
+                "Video must be between 1 second and 5 minutes."
+            )
 
         video_update(
             job_id,
@@ -332,8 +624,10 @@ def process_video(job_id, url):
         command = [
             FFMPEG,
             "-y",
-            "-i", str(source),
-            "-t", str(VIDEO_MAX_DURATION),
+            "-i",
+            str(source),
+            "-t",
+            str(VIDEO_MAX_DURATION),
             "-vf",
             (
                 f"fps={VIDEO_FPS},"
@@ -341,11 +635,15 @@ def process_video(job_id, url):
                 "force_original_aspect_ratio=decrease,"
                 f"pad={VIDEO_WIDTH}:{VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2"
             ),
-            "-q:v", "6",
-            "-start_number", "1",
-            "-progress", "pipe:1",
+            "-q:v",
+            "6",
+            "-start_number",
+            "1",
+            "-progress",
+            "pipe:1",
             "-nostats",
-            "-loglevel", "error",
+            "-loglevel",
+            "error",
             str(pattern)
         ]
 
@@ -360,25 +658,41 @@ def process_video(job_id, url):
         for line in process.stdout:
             if line.startswith("out_time_ms="):
                 try:
-                    elapsed = int(line.split("=")[1]) / 1_000_000
+                    elapsed = (
+                        int(line.split("=")[1])
+                        / 1_000_000
+                    )
+
                     percent = 20 + int(
                         min(1, elapsed / duration) * 80
                     )
 
-                    video_update(job_id, progress=percent)
+                    video_update(
+                        job_id,
+                        progress=percent
+                    )
 
-                except (ValueError, ZeroDivisionError):
+                except (
+                    ValueError,
+                    ZeroDivisionError
+                ):
                     pass
 
         return_code = process.wait()
 
         if return_code != 0:
-            raise ValueError("Video processing failed.")
+            raise ValueError(
+                "Video processing failed."
+            )
 
-        frames = sorted(folder.glob("frame_*.jpg"))
+        frames = sorted(
+            folder.glob("frame_*.jpg")
+        )
 
         if not frames:
-            raise ValueError("No video frames were generated.")
+            raise ValueError(
+                "No video frames were generated."
+            )
 
         source.unlink(missing_ok=True)
 
@@ -400,20 +714,32 @@ def process_video(job_id, url):
         )
 
 
+# ==========================================
+# START VIDEO
+# ==========================================
+
 @app.get("/video/start")
 def video_start(
-    url: str = Query(..., min_length=12, max_length=2048)
+    url: str = Query(
+        ...,
+        min_length=12,
+        max_length=2048
+    )
 ):
     with VIDEO_LOCK:
         active = sum(
-            job["status"] in {"queued", "downloading", "processing"}
+            job["status"] in {
+                "queued",
+                "downloading",
+                "processing"
+            }
             for job in VIDEO_JOBS.values()
         )
 
         if active >= 2:
             raise HTTPException(
                 429,
-                "The server is currently processing two videos."
+                "Server is processing two videos."
             )
 
         job_id = secrets.token_urlsafe(16)
@@ -425,7 +751,11 @@ def video_start(
             "frame_count": 0
         }
 
-    VIDEO_EXECUTOR.submit(process_video, job_id, url)
+    VIDEO_EXECUTOR.submit(
+        process_video,
+        job_id,
+        url
+    )
 
     return {
         "job_id": job_id,
@@ -433,13 +763,20 @@ def video_start(
     }
 
 
+# ==========================================
+# VIDEO STATUS
+# ==========================================
+
 @app.get("/video/status/{job_id}")
 def video_status(job_id: str):
     with VIDEO_LOCK:
         job = VIDEO_JOBS.get(job_id)
 
         if not job:
-            raise HTTPException(404, "Video job not found.")
+            raise HTTPException(
+                404,
+                "Video job not found."
+            )
 
         return {
             "job_id": job_id,
@@ -447,19 +784,38 @@ def video_status(job_id: str):
         }
 
 
+# ==========================================
+# GET ORIGINAL JPEG FRAME
+# ==========================================
+
 @app.get("/video/frame/{job_id}/{frame_index}")
-def video_frame(job_id: str, frame_index: int):
+def video_frame(
+    job_id: str,
+    frame_index: int
+):
     with VIDEO_LOCK:
         job = VIDEO_JOBS.get(job_id)
 
         if not job:
-            raise HTTPException(404, "Video job not found.")
+            raise HTTPException(
+                404,
+                "Video job not found."
+            )
 
         if job["status"] != "ready":
-            raise HTTPException(409, "Video is not ready yet.")
+            raise HTTPException(
+                409,
+                "Video is not ready."
+            )
 
-        if frame_index < 0 or frame_index >= job["frame_count"]:
-            raise HTTPException(404, "Frame does not exist.")
+        if (
+            frame_index < 0
+            or frame_index >= job["frame_count"]
+        ):
+            raise HTTPException(
+                404,
+                "Frame does not exist."
+            )
 
     frame_number = frame_index + 1
 
@@ -470,10 +826,109 @@ def video_frame(job_id: str, frame_index: int):
     )
 
     if not path.is_file():
-        raise HTTPException(404, "Frame file not found.")
+        raise HTTPException(
+            404,
+            "Frame file not found."
+        )
 
     return FileResponse(
         path,
         media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=3600"}
+        headers={
+            "Cache-Control": "public, max-age=3600"
+        }
     )
+
+
+# ==========================================
+# NEW: CONVERT VIDEO FRAME DIRECTLY TO RLE
+# ==========================================
+
+@app.get("/video/convert/{job_id}/{frame_index}")
+def video_convert(
+    job_id: str,
+    frame_index: int,
+    width: int = Query(
+        64,
+        ge=8,
+        le=MAX_OUTPUT_SIDE
+    ),
+    colors: int = Query(
+        32,
+        ge=2,
+        le=256
+    )
+):
+    # Verify job and frame.
+    with VIDEO_LOCK:
+        job = VIDEO_JOBS.get(job_id)
+
+        if not job:
+            raise HTTPException(
+                404,
+                "Video job not found."
+            )
+
+        if job["status"] != "ready":
+            raise HTTPException(
+                409,
+                "Video is not ready."
+            )
+
+        if (
+            frame_index < 0
+            or frame_index >= job["frame_count"]
+        ):
+            raise HTTPException(
+                404,
+                "Frame does not exist."
+            )
+
+    # Locate the locally stored JPEG.
+    frame_number = frame_index + 1
+
+    path = (
+        VIDEO_ROOT
+        / job_id
+        / f"frame_{frame_number:06d}.jpg"
+    )
+
+    if not path.is_file():
+        raise HTTPException(
+            404,
+            "Frame file not found."
+        )
+
+    # Convert directly from disk.
+    # No external HTTP request is made.
+    try:
+        with Image.open(path) as source_image:
+            source_image.load()
+
+            result = image_to_rle(
+                source_image,
+                width,
+                colors
+            )
+
+        result["frame_index"] = frame_index
+
+        return result
+
+    except HTTPException:
+        raise
+
+    except (
+        UnidentifiedImageError,
+        OSError,
+        ValueError
+    ):
+        raise HTTPException(
+            500,
+            "Could not convert video frame."
+        )
+
+
+# ==========================================
+# END
+# ==========================================
