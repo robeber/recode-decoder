@@ -31,7 +31,7 @@ from PIL import (
 
 app = FastAPI(
     title="RECODE Image and Video Converter",
-    version="3.0.0"
+    version="4.0.0"
 )
 
 app.add_middleware(
@@ -52,7 +52,7 @@ ALLOWED_HOSTS = {
 
 MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024
 MAX_SOURCE_PIXELS = 16_000_000
-MAX_OUTPUT_SIDE = 96
+MAX_OUTPUT_SIDE = 128
 
 Image.MAX_IMAGE_PIXELS = MAX_SOURCE_PIXELS
 
@@ -120,7 +120,7 @@ def download_image(url: str) -> Image.Image:
         with requests.get(
             url,
             headers={
-                "User-Agent": "RECODE-Image-Converter/3.0"
+                "User-Agent": "RECODE-Image-Converter/4.0"
             },
             timeout=(8, 15),
             stream=True,
@@ -221,8 +221,8 @@ def download_image(url: str) -> Image.Image:
 
 def image_to_rle(
     image: Image.Image,
-    width: int = 64,
-    colors: int = 32
+    width: int = 128,
+    colors: int = 64
 ):
     image = ImageOps.exif_transpose(image).convert("RGBA")
 
@@ -314,7 +314,9 @@ def image_to_rle(
 def home():
     return {
         "service": "RECODE Image and Video Converter",
-        "version": "3.0.0",
+        "version": "4.0.0",
+        "video_fps": VIDEO_FPS,
+        "output_width": MAX_OUTPUT_SIDE,
         "endpoints": [
             "/health",
             "/convert",
@@ -330,7 +332,9 @@ def home():
 @app.get("/health")
 def health():
     return {
-        "ok": True
+        "ok": True,
+        "version": "4.0.0",
+        "video_fps": VIDEO_FPS
     }
 
 
@@ -346,12 +350,12 @@ def convert(
         max_length=2048
     ),
     width: int = Query(
-        64,
+        128,
         ge=8,
         le=MAX_OUTPUT_SIDE
     ),
     colors: int = Query(
-        32,
+        64,
         ge=2,
         le=256
     )
@@ -372,7 +376,7 @@ def convert(
 VIDEO_MAX_BYTES = 100 * 1024 * 1024
 VIDEO_MAX_DURATION = 300
 
-VIDEO_FPS = 15
+VIDEO_FPS = 30
 VIDEO_WIDTH = 320
 VIDEO_HEIGHT = 180
 
@@ -853,14 +857,14 @@ def video_convert(
     job_id: str,
     frame_index: int,
     width: int = Query(
-        64,
+        128,
         ge=8,
         le=MAX_OUTPUT_SIDE
     ),
     colors: int = Query(
-        32,
+        64,
         ge=2,
-        le=256
+        le=64
     )
 ):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id):
@@ -944,29 +948,27 @@ def video_batch(
         ge=0
     ),
     count: int = Query(
-        30,
+        10,
         ge=1,
-        le=30
+        le=10
     ),
     width: int = Query(
-        64,
+        128,
         ge=8,
-        le=64
+        le=128
     ),
     colors: int = Query(
-        32,
+        64,
         ge=2,
-        le=32
+        le=64
     )
 ):
-    # Validate job ID.
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id):
         raise HTTPException(
             400,
             "Invalid job ID."
         )
 
-    # Verify video job.
     with VIDEO_LOCK:
         job = VIDEO_JOBS.get(job_id)
 
@@ -997,7 +999,6 @@ def video_batch(
 
     converted_frames = []
 
-    # Convert the requested frames.
     for frame_index in range(start, end):
         frame_number = frame_index + 1
 
