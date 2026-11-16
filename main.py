@@ -265,18 +265,16 @@ def process_video(job_id, url):
 
         validate_video_url(url)
 
-        with requests.get(
+                with requests.get(
             url,
-            with requests.get(
-    url,
-    headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
-    },
-    stream=True,
-    timeout=(10, 30),
-    allow_redirects=False,
-) as response:
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
+            },
+            stream=True,
+            timeout=(10, 30),
+            allow_redirects=False,
+        ) as response:
 
             if response.is_redirect:
                 raise ValueError("Video redirects are not supported.")
