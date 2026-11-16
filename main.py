@@ -33,7 +33,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ALLOWED_HOSTS = {"i.postimg.cc"}
+ALLOWED_HOSTS = {"i.postimg.cc, rule34. xxx, api.rule34.xxx, wimg.rule34.xxx"}
 MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024
 MAX_SOURCE_PIXELS = 16_000_000
 MAX_OUTPUT_SIDE = 96
@@ -267,11 +267,16 @@ def process_video(job_id, url):
 
         with requests.get(
             url,
-            headers={"User-Agent": "RECODE-Video-Viewer/1.0"},
-            stream=True,
-            timeout=(10, 30),
-            allow_redirects=False
-        ) as response:
+            with requests.get(
+    url,
+    headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
+    },
+    stream=True,
+    timeout=(10, 30),
+    allow_redirects=False,
+) as response:
 
             if response.is_redirect:
                 raise ValueError("Video redirects are not supported.")
