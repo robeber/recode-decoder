@@ -48,6 +48,9 @@ app.add_middleware(
 
 ALLOWED_HOSTS = {
     "i.postimg.cc",
+    "api.rule34.xxx",
+    "wimg.rule34.xxx",
+    "rule34.xxx",
 }
 
 MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024
