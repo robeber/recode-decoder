@@ -263,9 +263,9 @@ def process_video(job_id, url):
             message="Downloading video"
         )
 
-        validate_video_url(url)
+         validate_video_url(url)
 
-                with requests.get(
+        with requests.get(
             url,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
